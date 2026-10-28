@@ -740,15 +740,15 @@ function drawGrid(ctx: CanvasRenderingContext2D) {
   }
 }
 
-function getZoneCenter(points: Pt[]) {
-  const xs = points.map(p => p.x)
-  const ys = points.map(p => p.y)
+// function getZoneCenter(points: Pt[]) {
+//   const xs = points.map(p => p.x)
+//   const ys = points.map(p => p.y)
 
-  return {
-    x: (Math.min(...xs) + Math.max(...xs)) / 2,
-    y: (Math.min(...ys) + Math.max(...ys)) / 2,
-  }
-}
+//   return {
+//     x: (Math.min(...xs) + Math.max(...xs)) / 2,
+//     y: (Math.min(...ys) + Math.max(...ys)) / 2,
+//   }
+// }
 
 function drawZone(
   ctx: CanvasRenderingContext2D,
