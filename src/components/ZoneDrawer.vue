@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 
 interface Pt {
   x: number
@@ -36,15 +42,33 @@ const redoStack: string[] = []
 const STORAGE_KEY = 'zone-drawer'
 
 const selected = computed(
-  () => zones.value.find(z => z.id === selectedId.value) ?? null
+  () => zones.value.find(z => z.id === selectedId.value) ?? null,
 )
 
+// -----------------------------------------------------------------------------
 // Rectangle drag state
-let rectangleStart: Pt | null = null
-let rectangleCurrent: Pt | null = null
-let rectangleDragging = false
+// -----------------------------------------------------------------------------
 
+const rectangleStart = ref<Pt | null>(null)
+const rectangleCurrent = ref<Pt | null>(null)
+const rectangleDragging = ref(false)
+
+// -----------------------------------------------------------------------------
+// Zone moving state
+// -----------------------------------------------------------------------------
+
+// Use a ref because movingZone is also accessed by the Vue template.
+const movingZone = ref<Zone | null>(null)
+
+let moveStartMouse: Pt | null = null
+let moveOriginalPoints: Pt[] | null = null
+let moveOriginalState: string | null = null
+let moveChanged = false
+
+// -----------------------------------------------------------------------------
 // View
+// -----------------------------------------------------------------------------
+
 const view = ref({
   x: 0,
   y: 0,
@@ -62,14 +86,12 @@ let panning: {
 
 let spaceDown = false
 
-function cloneZones() {
-  return JSON.parse(JSON.stringify(zones.value))
+function cloneZones(): Zone[] {
+  return JSON.parse(JSON.stringify(zones.value)) as Zone[]
 }
 
 /**
- * Save the current state before a mutation.
- *
- * This is intentionally called BEFORE every operation that changes zones.
+ * Record the current state before a mutation.
  */
 function snapshot() {
   undoStack.push(JSON.stringify(cloneZones()))
@@ -99,9 +121,18 @@ function restore(json: string) {
   }
 
   draft.value = []
-  rectangleStart = null
-  rectangleCurrent = null
-  rectangleDragging = false
+
+  rectangleStart.value = null
+  rectangleCurrent.value = null
+  rectangleDragging.value = false
+
+  movingZone.value = null
+  moveStartMouse = null
+  moveOriginalPoints = null
+  moveOriginalState = null
+  moveChanged = false
+
+  draw()
 }
 
 function undo() {
@@ -153,7 +184,9 @@ function rotateLabel() {
 function moveSelected(direction: 'forward' | 'backward') {
   if (!selected.value) return
 
-  const index = zones.value.findIndex(z => z.id === selected.value!.id)
+  const index = zones.value.findIndex(
+    z => z.id === selected.value!.id,
+  )
 
   if (index === -1) return
 
@@ -190,7 +223,7 @@ const toWorld = (sx: number, sy: number): Pt => ({
 })
 
 // -----------------------------------------------------------------------------
-// Drawing / snapping
+// Snapping
 // -----------------------------------------------------------------------------
 
 function snapToGrid(p: Pt): Pt {
@@ -260,7 +293,7 @@ function snapPoint(sx: number, sy: number): Pt {
 function createZone(
   points: Pt[],
   name?: string,
-  color = newColor.value
+  color = newColor.value,
 ) {
   if (points.length < 3) return
 
@@ -287,7 +320,7 @@ function finishDraft() {
 
   const name = window.prompt(
     'Zone name:',
-    `Zone ${zones.value.length + 1}`
+    `Zone ${zones.value.length + 1}`,
   )
 
   if (name !== null) {
@@ -317,7 +350,7 @@ function createRectangle(start: Pt, end: Pt) {
 
   const name = window.prompt(
     'Zone name:',
-    `Zone ${zones.value.length + 1}`
+    `Zone ${zones.value.length + 1}`,
   )
 
   if (name !== null) {
@@ -377,11 +410,88 @@ function hitZone(sx: number, sy: number) {
 }
 
 // -----------------------------------------------------------------------------
+// Moving zones
+// -----------------------------------------------------------------------------
+
+function startMovingZone(z: Zone, mouse: Pt) {
+  movingZone.value = z
+  moveStartMouse = snapToGrid(mouse)
+  moveOriginalPoints = z.points.map(p => ({ ...p }))
+
+  // Preserve the complete state from before the drag.
+  // It is only added to the undo stack if the zone actually moves.
+  moveOriginalState = JSON.stringify(cloneZones())
+  moveChanged = false
+}
+
+function updateMovingZone(mouse: Pt) {
+  const zone = movingZone.value
+
+  if (!zone || !moveStartMouse || !moveOriginalPoints) {
+    return
+  }
+
+  const current = snapToGrid(mouse)
+
+  const dx = current.x - moveStartMouse.x
+  const dy = current.y - moveStartMouse.y
+
+  if (dx === 0 && dy === 0) {
+    return
+  }
+
+  zone.points = moveOriginalPoints.map(p => ({
+    x: p.x + dx,
+    y: p.y + dy,
+  }))
+
+  moveChanged = true
+}
+
+function finishMovingZone() {
+  if (movingZone.value && moveChanged && moveOriginalState) {
+    undoStack.push(moveOriginalState)
+
+    if (undoStack.length > 200) {
+      undoStack.shift()
+    }
+
+    redoStack.length = 0
+  }
+
+  movingZone.value = null
+  moveStartMouse = null
+  moveOriginalPoints = null
+  moveOriginalState = null
+  moveChanged = false
+}
+
+function cancelMovingZone() {
+  const zone = movingZone.value
+
+  if (zone && moveOriginalPoints && moveChanged) {
+    zone.points = moveOriginalPoints.map(p => ({ ...p }))
+  }
+
+  movingZone.value = null
+  moveStartMouse = null
+  moveOriginalPoints = null
+  moveOriginalState = null
+  moveChanged = false
+}
+
+// -----------------------------------------------------------------------------
 // Pointer handling
 // -----------------------------------------------------------------------------
 
 function getPointerPosition(e: PointerEvent) {
-  const r = canvas.value!.getBoundingClientRect()
+  const c = canvas.value
+
+  if (!c) {
+    return { sx: 0, sy: 0 }
+  }
+
+  const r = c.getBoundingClientRect()
 
   return {
     sx: e.clientX - r.left,
@@ -390,11 +500,16 @@ function getPointerPosition(e: PointerEvent) {
 }
 
 function onPointerDown(e: PointerEvent) {
-  const { sx, sy } = getPointerPosition(e)
+  const c = canvas.value
 
+  if (!c) return
+
+  const { sx, sy } = getPointerPosition(e)
+  const world = toWorld(sx, sy)
   const hit = hitZone(sx, sy)
 
-  // Middle mouse / right mouse / space = pan
+  // Middle mouse / right mouse / space = pan.
+  // In select mode, dragging empty space also pans.
   if (
     e.button === 1 ||
     e.button === 2 ||
@@ -408,7 +523,7 @@ function onPointerDown(e: PointerEvent) {
       vy: view.value.y,
     }
 
-    canvas.value!.setPointerCapture(e.pointerId)
+    c.setPointerCapture(e.pointerId)
 
     if (tool.value === 'select' && e.button === 0) {
       selectedId.value = null
@@ -419,21 +534,21 @@ function onPointerDown(e: PointerEvent) {
 
   if (e.button !== 0) return
 
-  // Rectangle tool
+  // Rectangle tool: both corners snap to the 1 m grid.
   if (tool.value === 'rectangle') {
-    rectangleStart = snapToGrid(toWorld(sx, sy))
-    rectangleCurrent = rectangleStart
-    rectangleDragging = true
+    rectangleStart.value = snapToGrid(world)
+    rectangleCurrent.value = { ...rectangleStart.value }
+    rectangleDragging.value = true
 
-    canvas.value!.setPointerCapture(e.pointerId)
+    c.setPointerCapture(e.pointerId)
+    draw()
 
     return
   }
 
-  // Polygon drawing
+  // Polygon drawing.
   if (tool.value === 'draw') {
     const p = snapPoint(sx, sy)
-
     const first = draft.value[0]
 
     if (
@@ -452,15 +567,21 @@ function onPointerDown(e: PointerEvent) {
       return
     }
 
-    // First point of a polygon doesn't mutate a zone yet,
-    // so there is no undo snapshot needed here.
     draft.value.push(p)
 
     return
   }
 
-  // Selection
-  selectedId.value = hit?.id ?? null
+  // Selection and dragging a zone.
+  if (tool.value === 'select') {
+    selectedId.value = hit?.id ?? null
+
+    if (hit) {
+      startMovingZone(hit, world)
+      c.setPointerCapture(e.pointerId)
+      draw()
+    }
+  }
 }
 
 function onPointerMove(e: PointerEvent) {
@@ -472,6 +593,8 @@ function onPointerMove(e: PointerEvent) {
 
     view.value.y =
       panning.vy + e.clientY - panning.sy
+
+    draw()
   }
 
   mouseWorld.value = toWorld(sx, sy)
@@ -482,27 +605,48 @@ function onPointerMove(e: PointerEvent) {
     hover.value = null
   }
 
-  if (rectangleDragging) {
-    rectangleCurrent = snapToGrid(toWorld(sx, sy))
+  if (rectangleDragging.value) {
+    rectangleCurrent.value = snapToGrid(
+      toWorld(sx, sy),
+    )
+
+    draw()
+  }
+
+  if (movingZone.value) {
+    updateMovingZone(toWorld(sx, sy))
+    draw()
   }
 }
 
 function onPointerUp(e: PointerEvent) {
-  if (rectangleDragging && rectangleStart && rectangleCurrent) {
-    createRectangle(
-      rectangleStart,
-      rectangleCurrent
-    )
+  const start = rectangleStart.value
+  const end = rectangleCurrent.value
+
+  if (
+    rectangleDragging.value &&
+    start &&
+    end
+  ) {
+    createRectangle(start, end)
   }
 
-  rectangleStart = null
-  rectangleCurrent = null
-  rectangleDragging = false
+  if (movingZone.value) {
+    finishMovingZone()
+  }
+
+  rectangleStart.value = null
+  rectangleCurrent.value = null
+  rectangleDragging.value = false
   panning = null
 
-  if (canvas.value?.hasPointerCapture(e.pointerId)) {
-    canvas.value.releasePointerCapture(e.pointerId)
+  const c = canvas.value
+
+  if (c?.hasPointerCapture(e.pointerId)) {
+    c.releasePointerCapture(e.pointerId)
   }
+
+  draw()
 }
 
 // -----------------------------------------------------------------------------
@@ -512,7 +656,11 @@ function onPointerUp(e: PointerEvent) {
 function onWheel(e: WheelEvent) {
   e.preventDefault()
 
-  const r = canvas.value!.getBoundingClientRect()
+  const c = canvas.value
+
+  if (!c) return
+
+  const r = c.getBoundingClientRect()
 
   const sx = e.clientX - r.left
   const sy = e.clientY - r.top
@@ -524,20 +672,18 @@ function onWheel(e: WheelEvent) {
       400,
       Math.max(
         4,
-        view.value.scale *
-          Math.exp(-e.deltaY * 0.01)
-      )
+        view.value.scale * Math.exp(-e.deltaY * 0.01),
+      ),
     )
 
-    view.value.x =
-      sx - before.x * view.value.scale
-
-    view.value.y =
-      sy + before.y * view.value.scale
+    view.value.x = sx - before.x * view.value.scale
+    view.value.y = sy + before.y * view.value.scale
   } else {
     view.value.x -= e.deltaX
     view.value.y -= e.deltaY
   }
+
+  draw()
 }
 
 // -----------------------------------------------------------------------------
@@ -547,21 +693,22 @@ function onWheel(e: WheelEvent) {
 function onDblClick(e: MouseEvent) {
   if (tool.value !== 'select') return
 
-  const r = canvas.value!.getBoundingClientRect()
+  const c = canvas.value
+
+  if (!c) return
+
+  const r = c.getBoundingClientRect()
 
   const z = hitZone(
     e.clientX - r.left,
-    e.clientY - r.top
+    e.clientY - r.top,
   )
 
   if (z) renameZone(z)
 }
 
 function renameZone(z: Zone) {
-  const name = window.prompt(
-    'Zone name:',
-    z.name
-  )
+  const name = window.prompt('Zone name:', z.name)
 
   if (name !== null) {
     const trimmed = name.trim()
@@ -579,7 +726,7 @@ function deleteSelected() {
   snapshot()
 
   zones.value = zones.value.filter(
-    z => z.id !== selectedId.value
+    z => z.id !== selectedId.value,
   )
 
   selectedId.value = null
@@ -628,9 +775,12 @@ function onKey(e: KeyboardEvent) {
   } else if (e.key === 'Escape') {
     draft.value = []
 
-    rectangleStart = null
-    rectangleCurrent = null
-    rectangleDragging = false
+    rectangleStart.value = null
+    rectangleCurrent.value = null
+    rectangleDragging.value = false
+
+    cancelMovingZone()
+    draw()
   } else if (e.key === 'Enter') {
     if (tool.value === 'draw') {
       finishDraft()
@@ -685,9 +835,7 @@ function drawGrid(ctx: CanvasRenderingContext2D) {
     ctx.lineWidth = 1
 
     const px =
-      Math.round(
-        toScreen({ x, y: 0 }).x
-      ) + 0.5
+      Math.round(toScreen({ x, y: 0 }).x) + 0.5
 
     ctx.beginPath()
     ctx.moveTo(px, 0)
@@ -704,9 +852,7 @@ function drawGrid(ctx: CanvasRenderingContext2D) {
     ctx.lineWidth = 1
 
     const py =
-      Math.round(
-        toScreen({ x: 0, y }).y
-      ) + 0.5
+      Math.round(toScreen({ x: 0, y }).y) + 0.5
 
     ctx.beginPath()
     ctx.moveTo(0, py)
@@ -727,7 +873,7 @@ function drawGrid(ctx: CanvasRenderingContext2D) {
     ctx.fillText(
       `${x}m`,
       toScreen({ x, y: 0 }).x + 3,
-      12
+      12,
     )
   }
 
@@ -739,7 +885,7 @@ function drawGrid(ctx: CanvasRenderingContext2D) {
     ctx.fillText(
       `${y}m`,
       4,
-      toScreen({ x: 0, y }).y - 3
+      toScreen({ x: 0, y }).y - 3,
     )
   }
 }
@@ -747,7 +893,7 @@ function drawGrid(ctx: CanvasRenderingContext2D) {
 function drawZone(
   ctx: CanvasRenderingContext2D,
   z: Zone,
-  sel: boolean
+  sel: boolean,
 ) {
   const pts = z.points.map(toScreen)
 
@@ -756,7 +902,7 @@ function drawZone(
   pts.forEach((p, i) =>
     i
       ? ctx.lineTo(p.x, p.y)
-      : ctx.moveTo(p.x, p.y)
+      : ctx.moveTo(p.x, p.y),
   )
 
   ctx.closePath()
@@ -766,7 +912,6 @@ function drawZone(
   ctx.fill()
 
   ctx.globalAlpha = 1
-
   ctx.strokeStyle = z.color
   ctx.lineWidth = sel ? 3 : 2
   ctx.stroke()
@@ -779,7 +924,7 @@ function drawZone(
         p.x - 3,
         p.y - 3,
         6,
-        6
+        6,
       )
     })
   }
@@ -787,15 +932,8 @@ function drawZone(
   const xs = pts.map(p => p.x)
   const ys = pts.map(p => p.y)
 
-  const cx =
-    (Math.min(...xs) +
-      Math.max(...xs)) /
-    2
-
-  const cy =
-    (Math.min(...ys) +
-      Math.max(...ys)) /
-    2
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2
 
   ctx.save()
 
@@ -812,64 +950,56 @@ function drawZone(
     labelY = cy
   }
 
-  // Positive canvas rotation is clockwise.
-  // Therefore negative values give counter-clockwise rotation.
   ctx.translate(labelX, labelY)
 
   if (z.labelRotation) {
-    ctx.rotate(
-      (z.labelRotation * Math.PI) / 180
-    )
+    ctx.rotate((z.labelRotation * Math.PI) / 180)
   }
 
-  ctx.fillText(
-    z.name,
-    0,
-    0
-  )
+  ctx.fillText(z.name, 0, 0)
 
   ctx.font = '11px sans-serif'
   ctx.fillStyle = '#475569'
-
-  ctx.fillText(
-    `${area(z.points).toFixed(2)} m²`,
-    0,
-    16
-  )
+  ctx.fillText(`${area(z.points).toFixed(2)} m²`, 0, 16)
 
   ctx.restore()
 }
 
-function drawRectanglePreview(
-  ctx: CanvasRenderingContext2D
+function drawStartPoint(
+  ctx: CanvasRenderingContext2D,
+  point: Pt,
 ) {
-  if (
-    !rectangleDragging ||
-    !rectangleStart ||
-    !rectangleCurrent
-  ) {
+  const start = toScreen(point)
+
+  ctx.save()
+
+  // White outline keeps the blue marker visible on any background.
+  ctx.fillStyle = '#ffffff'
+  ctx.beginPath()
+  ctx.arc(start.x, start.y, 7, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.fillStyle = '#2563eb'
+  ctx.beginPath()
+  ctx.arc(start.x, start.y, 4.5, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.restore()
+}
+
+function drawRectanglePreview(ctx: CanvasRenderingContext2D) {
+  const start = rectangleStart.value
+  const current = rectangleCurrent.value
+
+  if (!rectangleDragging.value || !start || !current) {
     return
   }
 
-  const minX = Math.min(
-    rectangleStart.x,
-    rectangleCurrent.x
-  )
+  const minX = Math.min(start.x, current.x)
+  const maxX = Math.max(start.x, current.x)
 
-  const maxX = Math.max(
-    rectangleStart.x,
-    rectangleCurrent.x
-  )
-
-  const minY = Math.min(
-    rectangleStart.y,
-    rectangleCurrent.y
-  )
-
-  const maxY = Math.max(
-    rectangleStart.y,
-    rectangleCurrent.y
-  )
+  const minY = Math.min(start.y, current.y)
+  const maxY = Math.max(start.y, current.y)
 
   const pts = [
     toScreen({ x: minX, y: minY }),
@@ -890,7 +1020,7 @@ function drawRectanglePreview(
   pts.forEach((p, i) =>
     i
       ? ctx.lineTo(p.x, p.y)
-      : ctx.moveTo(p.x, p.y)
+      : ctx.moveTo(p.x, p.y),
   )
 
   ctx.closePath()
@@ -899,20 +1029,8 @@ function drawRectanglePreview(
   ctx.globalAlpha = 1
   ctx.stroke()
 
-  // Starting point
-  const start = toScreen(rectangleStart)
-
-  ctx.fillStyle = '#2563eb'
-
-  ctx.beginPath()
-  ctx.arc(
-    start.x,
-    start.y,
-    4,
-    0,
-    Math.PI * 2
-  )
-  ctx.fill()
+  // Explicitly render the blue starting-point marker.
+  drawStartPoint(ctx, start)
 
   ctx.restore()
 }
@@ -922,34 +1040,21 @@ function draw() {
 
   if (!c) return
 
-  const ctx = c.getContext('2d')!
+  const ctx = c.getContext('2d')
+
+  if (!ctx) return
+
   const dpr = window.devicePixelRatio || 1
 
-  ctx.setTransform(
-    dpr,
-    0,
-    0,
-    dpr,
-    0,
-    0
-  )
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
   ctx.fillStyle = '#ffffff'
-  ctx.fillRect(
-    0,
-    0,
-    size.w,
-    size.h
-  )
+  ctx.fillRect(0, 0, size.w, size.h)
 
   drawGrid(ctx)
 
   for (const z of zones.value) {
-    drawZone(
-      ctx,
-      z,
-      z.id === selectedId.value
-    )
+    drawZone(ctx, z, z.id === selectedId.value)
   }
 
   drawRectanglePreview(ctx)
@@ -965,7 +1070,7 @@ function draw() {
     pts.forEach((p, i) =>
       i
         ? ctx.lineTo(p.x, p.y)
-        : ctx.moveTo(p.x, p.y)
+        : ctx.moveTo(p.x, p.y),
     )
 
     if (hover.value) {
@@ -975,22 +1080,18 @@ function draw() {
 
     ctx.stroke()
 
+    // Draw the first polygon point distinctly as the start position.
+    drawStartPoint(ctx, draft.value[0]!)
+
     ctx.fillStyle = '#2563eb'
 
-    pts.forEach(p => {
+    pts.slice(1).forEach(p => {
       ctx.beginPath()
-      ctx.arc(
-        p.x,
-        p.y,
-        4,
-        0,
-        Math.PI * 2
-      )
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2)
       ctx.fill()
     })
 
-    const last =
-      draft.value[draft.value.length - 1]!
+    const last = draft.value[draft.value.length - 1]!
 
     if (
       hover.value &&
@@ -1001,36 +1102,21 @@ function draw() {
     ) {
       const len = Math.hypot(
         hover.value.x - last.x,
-        hover.value.y - last.y
+        hover.value.y - last.y,
       )
 
       const h = toScreen(hover.value)
 
       ctx.fillStyle = '#1e3a8a'
       ctx.font = '12px sans-serif'
-
-      ctx.fillText(
-        `${len.toFixed(2)} m`,
-        h.x + 10,
-        h.y - 10
-      )
+      ctx.fillText(`${len.toFixed(2)} m`, h.x + 10, h.y - 10)
     }
-  } else if (
-    hover.value &&
-    tool.value === 'draw'
-  ) {
+  } else if (hover.value && tool.value === 'draw') {
     const h = toScreen(hover.value)
 
     ctx.fillStyle = '#2563eb'
-
     ctx.beginPath()
-    ctx.arc(
-      h.x,
-      h.y,
-      4,
-      0,
-      Math.PI * 2
-    )
+    ctx.arc(h.x, h.y, 4, 0, Math.PI * 2)
     ctx.fill()
   }
 }
@@ -1070,13 +1156,10 @@ function exportJson() {
 
   const blob = new Blob(
     [JSON.stringify(data, null, 2)],
-    {
-      type: 'application/json',
-    }
+    { type: 'application/json' },
   )
 
   const a = document.createElement('a')
-
   a.href = URL.createObjectURL(blob)
   a.download = 'zones.json'
   a.click()
@@ -1085,9 +1168,7 @@ function exportJson() {
 }
 
 async function importJson(e: Event) {
-  const input =
-    e.target as HTMLInputElement
-
+  const input = e.target as HTMLInputElement
   const file = input.files?.[0]
 
   input.value = ''
@@ -1095,19 +1176,11 @@ async function importJson(e: Event) {
   if (!file) return
 
   try {
-    const data = JSON.parse(
-      await file.text()
-    )
-
-    const list =
-      Array.isArray(data)
-        ? data
-        : data.zones
+    const data = JSON.parse(await file.text())
+    const list = Array.isArray(data) ? data : data.zones
 
     if (!Array.isArray(list)) {
-      throw new Error(
-        'missing zones'
-      )
+      throw new Error('missing zones')
     }
 
     const next: Zone[] = list.map(
@@ -1118,31 +1191,25 @@ async function importJson(e: Event) {
           points?: Pt[]
           labelPosition?: unknown
           labelRotation?: unknown
-        }
+        },
       ) => {
         if (
           !Array.isArray(z.points) ||
           z.points.some(
             p =>
               typeof p.x !== 'number' ||
-              typeof p.y !== 'number'
+              typeof p.y !== 'number',
           )
         ) {
-          throw new Error(
-            'bad zone'
-          )
+          throw new Error('bad zone')
         }
 
         return {
           id: uid(),
-          name: String(
-            z.name ?? 'Zone'
-          ),
+          name: String(z.name ?? 'Zone'),
           color:
             typeof z.color === 'string' &&
-            /^#[0-9a-f]{6}$/i.test(
-              z.color
-            )
+            /^#[0-9a-f]{6}$/i.test(z.color)
               ? z.color
               : '#10b981',
           points: z.points.map(p => ({
@@ -1150,16 +1217,13 @@ async function importJson(e: Event) {
             y: p.y,
           })),
           labelPosition:
-            z.labelPosition === 'inside'
-              ? 'inside'
-              : 'above',
+            z.labelPosition === 'inside' ? 'inside' : 'above',
           labelRotation:
-            typeof z.labelRotation ===
-            'number'
+            typeof z.labelRotation === 'number'
               ? z.labelRotation
               : 0,
         }
-      }
+      },
     )
 
     snapshot()
@@ -1168,21 +1232,16 @@ async function importJson(e: Event) {
     selectedId.value = null
     draft.value = []
   } catch {
-    window.alert(
-      'Could not import: invalid zones file.'
-    )
+    window.alert('Could not import: invalid zones file.')
   }
 }
 
 function clearAll() {
   if (
     zones.value.length &&
-    window.confirm(
-      'Remove all zones?'
-    )
+    window.confirm('Remove all zones?')
   ) {
     snapshot()
-
     zones.value = []
     selectedId.value = null
   }
@@ -1203,24 +1262,16 @@ function resetView() {
 onMounted(() => {
   try {
     const saved = JSON.parse(
-      localStorage.getItem(
-        STORAGE_KEY
-      ) ?? '[]'
+      localStorage.getItem(STORAGE_KEY) ?? '[]',
     )
 
     if (Array.isArray(saved)) {
-      zones.value = saved.map(
-        (z: Zone) => ({
-          ...z,
-          color:
-            z.color ?? '#10b981',
-          labelPosition:
-            z.labelPosition ??
-            'above',
-          labelRotation:
-            z.labelRotation ?? 0,
-        })
-      )
+      zones.value = saved.map((z: Zone) => ({
+        ...z,
+        color: z.color ?? '#10b981',
+        labelPosition: z.labelPosition ?? 'above',
+        labelRotation: z.labelRotation ?? 0,
+      }))
     }
   } catch {
     // Ignore corrupt storage.
@@ -1229,43 +1280,20 @@ onMounted(() => {
   resize()
   resetView()
 
-  window.addEventListener(
-    'resize',
-    resize
-  )
+  window.addEventListener('resize', resize)
+  window.addEventListener('keydown', onKey)
+  window.addEventListener('keyup', onKey)
 
-  window.addEventListener(
-    'keydown',
-    onKey
-  )
-
-  window.addEventListener(
-    'keyup',
-    onKey
-  )
-
-  canvas.value!.addEventListener(
-    'wheel',
-    onWheel,
-    { passive: false }
-  )
+  canvas.value?.addEventListener('wheel', onWheel, {
+    passive: false,
+  })
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener(
-    'resize',
-    resize
-  )
-
-  window.removeEventListener(
-    'keydown',
-    onKey
-  )
-
-  window.removeEventListener(
-    'keyup',
-    onKey
-  )
+  window.removeEventListener('resize', resize)
+  window.removeEventListener('keydown', onKey)
+  window.removeEventListener('keyup', onKey)
+  canvas.value?.removeEventListener('wheel', onWheel)
 })
 
 watch(
@@ -1276,27 +1304,26 @@ watch(
     selectedId,
     view,
     tool,
+    rectangleStart,
     rectangleCurrent,
+    rectangleDragging,
+    movingZone,
   ],
   draw,
-  { deep: true }
+  { deep: true },
 )
 
 watch(
   zones,
-  z =>
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(z)
-    ),
-  { deep: true }
+  z => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(z))
+  },
+  { deep: true },
 )
 </script>
 
 <template>
-  <div
-    class="h-screen flex flex-col bg-slate-100 text-slate-800"
-  >
+  <div class="h-screen flex flex-col bg-slate-100 text-slate-800">
     <nav
       class="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-sm shrink-0"
     >
@@ -1326,9 +1353,7 @@ watch(
         @change="importJson"
       />
 
-      <span
-        class="mx-2 h-5 w-px bg-slate-600"
-      />
+      <span class="mx-2 h-5 w-px bg-slate-600" />
 
       <button
         class="px-3 py-1 rounded"
@@ -1389,16 +1414,13 @@ watch(
           Delete
         </button>
 
-        <span
-          class="mx-1 h-5 w-px bg-slate-600"
-        />
+        <span class="mx-1 h-5 w-px bg-slate-600" />
 
         <button
           class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
           :disabled="
-            zones.findIndex(
-              z => z.id === selected?.id
-            ) >= zones.length - 1
+            zones.findIndex(z => z.id === selected?.id) >=
+            zones.length - 1
           "
           title="Move zone one layer forward"
           @click="moveSelected('forward')"
@@ -1409,9 +1431,7 @@ watch(
         <button
           class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
           :disabled="
-            zones.findIndex(
-              z => z.id === selected?.id
-            ) <= 0
+            zones.findIndex(z => z.id === selected?.id) <= 0
           "
           title="Move zone one layer backward"
           @click="moveSelected('backward')"
@@ -1419,9 +1439,7 @@ watch(
           Backward ↓
         </button>
 
-        <span
-          class="mx-1 h-5 w-px bg-slate-600"
-        />
+        <span class="mx-1 h-5 w-px bg-slate-600" />
 
         <button
           class="px-3 py-1 rounded"
@@ -1430,9 +1448,7 @@ watch(
               ? 'bg-blue-600'
               : 'bg-slate-700 hover:bg-slate-600'
           "
-          @click="
-            setLabelPosition('above')
-          "
+          @click="setLabelPosition('above')"
         >
           Text above
         </button>
@@ -1444,9 +1460,7 @@ watch(
               ? 'bg-blue-600'
               : 'bg-slate-700 hover:bg-slate-600'
           "
-          @click="
-            setLabelPosition('inside')
-          "
+          @click="setLabelPosition('inside')"
         >
           Text inside
         </button>
@@ -1473,15 +1487,10 @@ watch(
         <input
           type="color"
           class="h-7 w-9 rounded cursor-pointer bg-transparent"
-          :value="
-            selected
-              ? selected.color
-              : newColor
-          "
+          :value="selected ? selected.color : newColor"
           @input="
             setColor(
-              ($event.target as HTMLInputElement)
-                .value
+              ($event.target as HTMLInputElement).value
             )
           "
         />
@@ -1532,11 +1541,14 @@ watch(
             ? 'cursor-crosshair'
             : tool === 'rectangle'
               ? 'cursor-crosshair'
-              : 'cursor-default'
+              : movingZone
+                ? 'cursor-move'
+                : 'cursor-default'
         "
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
         @pointerup="onPointerUp"
+        @pointercancel="onPointerUp"
         @dblclick="onDblClick"
         @contextmenu.prevent
       />
@@ -1547,18 +1559,22 @@ watch(
         x {{ mouseWorld.x.toFixed(1) }} m,
         y {{ mouseWorld.y.toFixed(1) }} m ·
         grid 1 m ·
+
         <span v-if="tool === 'draw'">
           click to add points, click first
           point or Enter to close
         </span>
+
         <span v-else-if="tool === 'rectangle'">
           click and drag from one corner to
           the opposite corner
         </span>
+
         <span v-else>
-          click a zone to select it, double-click
-          to rename
+          click and drag a zone to move it,
+          double-click to rename
         </span>
+
         · Backspace removes last point,
         Esc cancel, Ctrl+Z undo ·
         pan: scroll / right-drag / Space+drag ·
