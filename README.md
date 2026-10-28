@@ -1,5 +1,8 @@
-# Vue 3 + TypeScript + Vite
+# Zone Drawer
+Simple project to allow for zones to be drawn in standardized mesurement (1 meter units)
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+## Shaping
+Allows for straight lines and diagonals.
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+## Tools
+Draw and rectangle tools are built to speed up the process. It is built on a grid coordinate system. You can ajust layers and markers to fit your needs.
