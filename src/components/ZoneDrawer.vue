@@ -41,6 +41,10 @@ const redoStack: string[] = []
 
 const STORAGE_KEY = 'zone-drawer'
 
+// Clipboard state
+const clipboardZone = ref<Zone | null>(null)
+let pasteCount = 0
+
 const selected = computed(
   () => zones.value.find(z => z.id === selectedId.value) ?? null,
 )
@@ -57,7 +61,6 @@ const rectangleDragging = ref(false)
 // Zone moving state
 // -----------------------------------------------------------------------------
 
-// Use a ref because movingZone is also accessed by the Vue template.
 const movingZone = ref<Zone | null>(null)
 
 let moveStartMouse: Pt | null = null
@@ -207,6 +210,59 @@ function moveSelected(direction: 'forward' | 'backward') {
 }
 
 const uid = () => Math.random().toString(36).slice(2, 10)
+
+// -----------------------------------------------------------------------------
+// Copy / cut / paste
+// -----------------------------------------------------------------------------
+
+function copySelected() {
+  if (!selected.value) return
+
+  clipboardZone.value = JSON.parse(
+    JSON.stringify(selected.value),
+  ) as Zone
+
+  pasteCount = 0
+}
+
+function cutSelected() {
+  if (!selected.value) return
+
+  copySelected()
+  snapshot()
+
+  zones.value = zones.value.filter(
+    z => z.id !== selectedId.value,
+  )
+
+  selectedId.value = null
+}
+
+function pasteZone() {
+  const source = clipboardZone.value
+
+  if (!source) return
+
+  snapshot()
+
+  // Offset each successive paste so copies do not overlap exactly.
+  pasteCount += 1
+
+  const offset = pasteCount
+
+  const zone: Zone = {
+    ...JSON.parse(JSON.stringify(source)) as Zone,
+    id: uid(),
+    name: `${source.name} copy${pasteCount > 1 ? ` ${pasteCount}` : ''}`,
+    points: source.points.map(p => ({
+      x: p.x + offset,
+      y: p.y + offset,
+    })),
+  }
+
+  zones.value.push(zone)
+  selectedId.value = zone.id
+}
 
 // -----------------------------------------------------------------------------
 // Coordinate conversion
@@ -745,10 +801,47 @@ function onKey(e: KeyboardEvent) {
     return
   }
 
+  // Avoid intercepting shortcuts while typing in editable fields.
+  const target = e.target
+
   if (
-    (e.metaKey || e.ctrlKey) &&
-    e.key.toLowerCase() === 'z'
+    target instanceof HTMLElement &&
+    (
+      target.isContentEditable ||
+      ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+    )
   ) {
+    return
+  }
+
+  const mod = e.metaKey || e.ctrlKey
+  const key = e.key.toLowerCase()
+
+  if (mod && key === 'c') {
+    if (selected.value) {
+      e.preventDefault()
+      copySelected()
+    }
+    return
+  }
+
+  if (mod && key === 'x') {
+    if (selected.value) {
+      e.preventDefault()
+      cutSelected()
+    }
+    return
+  }
+
+  if (mod && key === 'v') {
+    if (clipboardZone.value) {
+      e.preventDefault()
+      pasteZone()
+    }
+    return
+  }
+
+  if (mod && key === 'z') {
     e.preventDefault()
 
     if (e.shiftKey) {
@@ -760,10 +853,7 @@ function onKey(e: KeyboardEvent) {
     return
   }
 
-  if (
-    (e.metaKey || e.ctrlKey) &&
-    e.key.toLowerCase() === 'y'
-  ) {
+  if (mod && key === 'y') {
     e.preventDefault()
     redo()
     return
@@ -795,11 +885,11 @@ function onKey(e: KeyboardEvent) {
     selected.value
   ) {
     deleteSelected()
-  } else if (e.key.toLowerCase() === 'v') {
+  } else if (key === 'v') {
     tool.value = 'select'
-  } else if (e.key.toLowerCase() === 'd') {
+  } else if (key === 'd') {
     tool.value = 'draw'
-  } else if (e.key.toLowerCase() === 'r') {
+  } else if (key === 'r') {
     tool.value = 'rectangle'
   }
 }
@@ -910,23 +1000,42 @@ function drawZone(
   ctx.globalAlpha = 0.25
   ctx.fillStyle = z.color
   ctx.fill()
-
   ctx.globalAlpha = 1
-  ctx.strokeStyle = z.color
-  ctx.lineWidth = sel ? 3 : 2
-  ctx.stroke()
 
   if (sel) {
-    ctx.fillStyle = z.color
+    // High-contrast double outline remains visible on any fill or grid.
+    ctx.save()
 
+    ctx.strokeStyle = '#000000'
+    ctx.lineWidth = 8
+    ctx.lineJoin = 'round'
+    ctx.stroke()
+
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 4
+    ctx.stroke()
+
+    ctx.strokeStyle = z.color
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+
+    // High-contrast vertex handles.
     pts.forEach(p => {
-      ctx.fillRect(
-        p.x - 3,
-        p.y - 3,
-        6,
-        6,
-      )
+      ctx.fillStyle = '#000000'
+      ctx.fillRect(p.x - 5, p.y - 5, 10, 10)
+
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(p.x - 3.5, p.y - 3.5, 7, 7)
+
+      ctx.fillStyle = z.color
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3)
     })
+
+    ctx.restore()
+  } else {
+    ctx.strokeStyle = z.color
+    ctx.lineWidth = 2
+    ctx.stroke()
   }
 
   const xs = pts.map(p => p.x)
@@ -938,7 +1047,6 @@ function drawZone(
   ctx.save()
 
   ctx.font = 'bold 14px sans-serif'
-  ctx.fillStyle = '#0f172a'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
 
@@ -956,9 +1064,20 @@ function drawZone(
     ctx.rotate((z.labelRotation * Math.PI) / 180)
   }
 
+  // Label outline improves readability over any zone color.
+  ctx.lineWidth = 3
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineJoin = 'round'
+  ctx.strokeText(z.name, 0, 0)
+
+  ctx.fillStyle = '#0f172a'
   ctx.fillText(z.name, 0, 0)
 
   ctx.font = '11px sans-serif'
+  ctx.lineWidth = 3
+  ctx.strokeStyle = '#ffffff'
+  ctx.strokeText(`${area(z.points).toFixed(2)} m²`, 0, 16)
+
   ctx.fillStyle = '#475569'
   ctx.fillText(`${area(z.points).toFixed(2)} m²`, 0, 16)
 
@@ -1029,7 +1148,6 @@ function drawRectanglePreview(ctx: CanvasRenderingContext2D) {
   ctx.globalAlpha = 1
   ctx.stroke()
 
-  // Explicitly render the blue starting-point marker.
   drawStartPoint(ctx, start)
 
   ctx.restore()
@@ -1080,7 +1198,6 @@ function draw() {
 
     ctx.stroke()
 
-    // Draw the first polygon point distinctly as the start position.
     drawStartPoint(ctx, draft.value[0]!)
 
     ctx.fillStyle = '#2563eb'
@@ -1195,6 +1312,7 @@ async function importJson(e: Event) {
       ) => {
         if (
           !Array.isArray(z.points) ||
+          z.points.length < 3 ||
           z.points.some(
             p =>
               typeof p.x !== 'number' ||
@@ -1325,261 +1443,290 @@ watch(
 <template>
   <div class="h-screen flex flex-col bg-slate-100 text-slate-800">
     <nav
-      class="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-sm shrink-0"
+      class="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-sm shrink-0 overflow-x-auto"
     >
-      <span class="font-semibold mr-4">
+      <span class="font-semibold mr-4 shrink-0">
         Zone Drawer
       </span>
 
-      <button
-        class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600"
-        @click="exportJson"
-      >
-        Save
-      </button>
+  <button
+    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+    @click="exportJson"
+  >
+    Save
+  </button>
 
-      <button
-        class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600"
-        @click="fileInput?.click()"
-      >
-        Import
-      </button>
+  <button
+    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+    @click="fileInput?.click()"
+  >
+    Import
+  </button>
 
-      <input
-        ref="fileInput"
-        type="file"
-        accept="application/json,.json"
-        class="hidden"
-        @change="importJson"
-      />
+  <input
+    ref="fileInput"
+    type="file"
+    accept="application/json,.json"
+    class="hidden"
+    @change="importJson"
+  />
 
-      <span class="mx-2 h-5 w-px bg-slate-600" />
+  <span class="mx-2 h-5 w-px bg-slate-600 shrink-0" />
 
-      <button
-        class="px-3 py-1 rounded"
-        :class="
-          tool === 'draw'
-            ? 'bg-blue-600'
-            : 'bg-slate-700 hover:bg-slate-600'
-        "
-        @click="tool = 'draw'"
-      >
-        Draw zone (D)
-      </button>
+  <button
+    class="px-3 py-1 rounded shrink-0"
+    :class="
+      tool === 'draw'
+        ? 'bg-blue-600'
+        : 'bg-slate-700 hover:bg-slate-600'
+    "
+    @click="tool = 'draw'"
+  >
+    Draw zone (D)
+  </button>
 
-      <button
-        class="px-3 py-1 rounded"
-        :class="
-          tool === 'rectangle'
-            ? 'bg-blue-600'
-            : 'bg-slate-700 hover:bg-slate-600'
-        "
-        @click="tool = 'rectangle'"
-      >
-        Rectangle (R)
-      </button>
+  <button
+    class="px-3 py-1 rounded shrink-0"
+    :class="
+      tool === 'rectangle'
+        ? 'bg-blue-600'
+        : 'bg-slate-700 hover:bg-slate-600'
+    "
+    @click="tool = 'rectangle'"
+  >
+    Rectangle (R)
+  </button>
 
-      <button
-        class="px-3 py-1 rounded"
-        :class="
-          tool === 'select'
-            ? 'bg-blue-600'
-            : 'bg-slate-700 hover:bg-slate-600'
-        "
-        @click="tool = 'select'"
-      >
-        Select (V)
-      </button>
+  <button
+    class="px-3 py-1 rounded shrink-0"
+    :class="
+      tool === 'select'
+        ? 'bg-blue-600'
+        : 'bg-slate-700 hover:bg-slate-600'
+    "
+    @click="tool = 'select'"
+  >
+    Select (V)
+  </button>
 
-      <button
-        v-if="draft.length >= 3"
-        class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500"
-        @click="finishDraft"
-      >
-        Finish zone
-      </button>
+  <button
+    v-if="draft.length >= 3"
+    class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 shrink-0"
+    @click="finishDraft"
+  >
+    Finish zone
+  </button>
 
-      <template v-if="selected">
-        <button
-          class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600"
-          @click="renameZone(selected)"
-        >
-          Rename
-        </button>
+  <template v-if="selected">
+    <span class="mx-1 h-5 w-px bg-slate-600 shrink-0" />
 
-        <button
-          class="px-3 py-1 rounded bg-red-600 hover:bg-red-500"
-          @click="deleteSelected"
-        >
-          Delete
-        </button>
-
-        <span class="mx-1 h-5 w-px bg-slate-600" />
-
-        <button
-          class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
-          :disabled="
-            zones.findIndex(z => z.id === selected?.id) >=
-            zones.length - 1
-          "
-          title="Move zone one layer forward"
-          @click="moveSelected('forward')"
-        >
-          Forward ↑
-        </button>
-
-        <button
-          class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
-          :disabled="
-            zones.findIndex(z => z.id === selected?.id) <= 0
-          "
-          title="Move zone one layer backward"
-          @click="moveSelected('backward')"
-        >
-          Backward ↓
-        </button>
-
-        <span class="mx-1 h-5 w-px bg-slate-600" />
-
-        <button
-          class="px-3 py-1 rounded"
-          :class="
-            selected.labelPosition === 'above'
-              ? 'bg-blue-600'
-              : 'bg-slate-700 hover:bg-slate-600'
-          "
-          @click="setLabelPosition('above')"
-        >
-          Text above
-        </button>
-
-        <button
-          class="px-3 py-1 rounded"
-          :class="
-            selected.labelPosition === 'inside'
-              ? 'bg-blue-600'
-              : 'bg-slate-700 hover:bg-slate-600'
-          "
-          @click="setLabelPosition('inside')"
-        >
-          Text inside
-        </button>
-
-        <button
-          class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600"
-          title="Rotate text 90° counter-clockwise"
-          @click="rotateLabel"
-        >
-          ↶ 90°
-        </button>
-      </template>
-
-      <label
-        class="flex items-center gap-1 ml-2"
-        :title="
-          selected
-            ? 'Color of selected zone'
-            : 'Color for new zones'
-        "
-      >
-        Color
-
-        <input
-          type="color"
-          class="h-7 w-9 rounded cursor-pointer bg-transparent"
-          :value="selected ? selected.color : newColor"
-          @input="
-            setColor(
-              ($event.target as HTMLInputElement).value
-            )
-          "
-        />
-      </label>
-
-      <button
-        class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
-        :disabled="undoStack.length === 0"
-        @click="undo"
-      >
-        Undo
-      </button>
-
-      <button
-        class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
-        :disabled="redoStack.length === 0"
-        @click="redo"
-      >
-        Redo
-      </button>
-
-      <span class="flex-1" />
-
-      <button
-        class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600"
-        @click="resetView"
-      >
-        Reset view
-      </button>
-
-      <button
-        class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600"
-        @click="clearAll"
-      >
-        Clear
-      </button>
-    </nav>
-
-    <div
-      ref="wrap"
-      class="flex-1 relative overflow-hidden"
+    <button
+      class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+      title="Copy selected zone (Ctrl/Cmd+C)"
+      @click="copySelected"
     >
-      <canvas
-        ref="canvas"
-        class="absolute inset-0"
-        :class="
-          tool === 'draw'
-            ? 'cursor-crosshair'
-            : tool === 'rectangle'
-              ? 'cursor-crosshair'
-              : movingZone
-                ? 'cursor-move'
-                : 'cursor-default'
-        "
-        @pointerdown="onPointerDown"
-        @pointermove="onPointerMove"
-        @pointerup="onPointerUp"
-        @pointercancel="onPointerUp"
-        @dblclick="onDblClick"
-        @contextmenu.prevent
-      />
+      Copy
+    </button>
 
-      <div
-        class="absolute bottom-2 left-2 text-xs bg-white/90 rounded px-2 py-1 shadow pointer-events-none"
-      >
-        x {{ mouseWorld.x.toFixed(1) }} m,
-        y {{ mouseWorld.y.toFixed(1) }} m ·
-        grid 1 m ·
+    <button
+      class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+      title="Cut selected zone (Ctrl/Cmd+X)"
+      @click="cutSelected"
+    >
+      Cut
+    </button>
 
-        <span v-if="tool === 'draw'">
-          click to add points, click first
-          point or Enter to close
-        </span>
+    <button
+      class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+      @click="renameZone(selected)"
+    >
+      Rename
+    </button>
 
-        <span v-else-if="tool === 'rectangle'">
-          click and drag from one corner to
-          the opposite corner
-        </span>
+    <button
+      class="px-3 py-1 rounded bg-red-600 hover:bg-red-500 shrink-0"
+      @click="deleteSelected"
+    >
+      Delete
+    </button>
 
-        <span v-else>
-          click and drag a zone to move it,
-          double-click to rename
-        </span>
+    <span class="mx-1 h-5 w-px bg-slate-600 shrink-0" />
 
-        · Backspace removes last point,
-        Esc cancel, Ctrl+Z undo ·
-        pan: scroll / right-drag / Space+drag ·
-        zoom: pinch or Ctrl+scroll
-      </div>
-    </div>
+    <button
+      class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 shrink-0"
+      :disabled="
+        zones.findIndex(z => z.id === selected?.id) >=
+        zones.length - 1
+      "
+      title="Move zone one layer forward"
+      @click="moveSelected('forward')"
+    >
+      Forward ↑
+    </button>
+
+    <button
+      class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 shrink-0"
+      :disabled="
+        zones.findIndex(z => z.id === selected?.id) <= 0
+      "
+      title="Move zone one layer backward"
+      @click="moveSelected('backward')"
+    >
+      Backward ↓
+    </button>
+
+    <span class="mx-1 h-5 w-px bg-slate-600 shrink-0" />
+
+    <button
+      class="px-3 py-1 rounded shrink-0"
+      :class="
+        selected.labelPosition === 'above'
+          ? 'bg-blue-600'
+          : 'bg-slate-700 hover:bg-slate-600'
+      "
+      @click="setLabelPosition('above')"
+    >
+      Text above
+    </button>
+
+    <button
+      class="px-3 py-1 rounded shrink-0"
+      :class="
+        selected.labelPosition === 'inside'
+          ? 'bg-blue-600'
+          : 'bg-slate-700 hover:bg-slate-600'
+      "
+      @click="setLabelPosition('inside')"
+    >
+      Text inside
+    </button>
+
+    <button
+      class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+      title="Rotate text 90° counter-clockwise"
+      @click="rotateLabel"
+    >
+      ↶ 90°
+    </button>
+  </template>
+
+  <button
+    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 shrink-0"
+    :disabled="!clipboardZone"
+    title="Paste copied zone (Ctrl/Cmd+V)"
+    @click="pasteZone"
+  >
+    Paste
+  </button>
+
+  <label
+    class="flex items-center gap-1 ml-2 shrink-0"
+    :title="
+      selected
+        ? 'Color of selected zone'
+        : 'Color for new zones'
+    "
+  >
+    Color
+
+    <input
+      type="color"
+      class="h-7 w-9 rounded cursor-pointer bg-transparent"
+      :value="selected ? selected.color : newColor"
+      @input="
+        setColor(
+          ($event.target as HTMLInputElement).value
+        )
+      "
+    />
+  </label>
+
+  <button
+    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 shrink-0"
+    :disabled="undoStack.length === 0"
+    @click="undo"
+  >
+    Undo
+  </button>
+
+  <button
+    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 shrink-0"
+    :disabled="redoStack.length === 0"
+    @click="redo"
+  >
+    Redo
+  </button>
+
+  <span class="flex-1" />
+
+  <button
+    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+    @click="resetView"
+  >
+    Reset view
+  </button>
+
+  <button
+    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 shrink-0"
+    @click="clearAll"
+  >
+    Clear
+  </button>
+</nav>
+
+<div
+  ref="wrap"
+  class="flex-1 relative overflow-hidden"
+>
+  <canvas
+    ref="canvas"
+    class="absolute inset-0"
+    :class="
+      tool === 'draw'
+        ? 'cursor-crosshair'
+        : tool === 'rectangle'
+          ? 'cursor-crosshair'
+          : movingZone
+            ? 'cursor-move'
+            : 'cursor-default'
+    "
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+    @pointerup="onPointerUp"
+    @pointercancel="onPointerUp"
+    @dblclick="onDblClick"
+    @contextmenu.prevent
+  />
+
+  <div
+    class="absolute bottom-2 left-2 text-xs bg-white/90 rounded px-2 py-1 shadow pointer-events-none"
+  >
+    x {{ mouseWorld.x.toFixed(1) }} m,
+    y {{ mouseWorld.y.toFixed(1) }} m ·
+    grid 1 m ·
+
+    <span v-if="tool === 'draw'">
+      click to add points, click first
+      point or Enter to close
+    </span>
+
+    <span v-else-if="tool === 'rectangle'">
+      click and drag from one corner to
+      the opposite corner
+    </span>
+
+    <span v-else>
+      click and drag a zone to move it,
+      double-click to rename
+    </span>
+
+    · Copy Ctrl/Cmd+C · Cut Ctrl/Cmd+X ·
+    Paste Ctrl/Cmd+V · Backspace removes last point ·
+    Esc cancel · Ctrl/Cmd+Z undo ·
+    pan: scroll / right-drag / Space+drag ·
+    zoom: pinch or Ctrl/Cmd+scroll
+  </div>
+</div>
+
   </div>
 </template>
