@@ -193,12 +193,16 @@ const toWorld = (sx: number, sy: number): Pt => ({
 // Drawing / snapping
 // -----------------------------------------------------------------------------
 
+function snapToGrid(p: Pt): Pt {
+  return {
+    x: Math.round(p.x),
+    y: Math.round(p.y),
+  }
+}
+
 function constrain(raw: Pt, from: Pt | null): Pt {
   if (!from) {
-    return {
-      x: Math.round(raw.x),
-      y: Math.round(raw.y),
-    }
+    return snapToGrid(raw)
   }
 
   const dx = raw.x - from.x
@@ -417,7 +421,7 @@ function onPointerDown(e: PointerEvent) {
 
   // Rectangle tool
   if (tool.value === 'rectangle') {
-    rectangleStart = toWorld(sx, sy)
+    rectangleStart = snapToGrid(toWorld(sx, sy))
     rectangleCurrent = rectangleStart
     rectangleDragging = true
 
@@ -479,7 +483,7 @@ function onPointerMove(e: PointerEvent) {
   }
 
   if (rectangleDragging) {
-    rectangleCurrent = toWorld(sx, sy)
+    rectangleCurrent = snapToGrid(toWorld(sx, sy))
   }
 }
 
@@ -740,16 +744,6 @@ function drawGrid(ctx: CanvasRenderingContext2D) {
   }
 }
 
-// function getZoneCenter(points: Pt[]) {
-//   const xs = points.map(p => p.x)
-//   const ys = points.map(p => p.y)
-
-//   return {
-//     x: (Math.min(...xs) + Math.max(...xs)) / 2,
-//     y: (Math.min(...ys) + Math.max(...ys)) / 2,
-//   }
-// }
-
 function drawZone(
   ctx: CanvasRenderingContext2D,
   z: Zone,
@@ -892,16 +886,33 @@ function drawRectanglePreview(
   ctx.lineWidth = 2
 
   ctx.beginPath()
+
   pts.forEach((p, i) =>
     i
       ? ctx.lineTo(p.x, p.y)
       : ctx.moveTo(p.x, p.y)
   )
+
   ctx.closePath()
   ctx.fill()
 
   ctx.globalAlpha = 1
   ctx.stroke()
+
+  // Starting point
+  const start = toScreen(rectangleStart)
+
+  ctx.fillStyle = '#2563eb'
+
+  ctx.beginPath()
+  ctx.arc(
+    start.x,
+    start.y,
+    4,
+    0,
+    Math.PI * 2
+  )
+  ctx.fill()
 
   ctx.restore()
 }
